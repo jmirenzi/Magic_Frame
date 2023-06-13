@@ -2,22 +2,14 @@
 
 
 
-void initializeSteppers();
+void Steppers_Init();
 
-void calibrateGlobals(float, float);
+void limitStop();
 
-void updateGlobals();
+void calibrationToOrigin();
 
-void moveR(float, float, float, float);
+void coreXYMoveTo(double X_des, double Y_des);
 
-void moveR_paired(float, float, float, float);
-
-float mag(float, float);
-
-float distTo(float,float);
-
-void move(float,float);
-
-void move_paired(float,float);
+void coreXYMove(double dx, double dy);
 
 void processCommand(bool noSerialResponse = false);
