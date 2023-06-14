@@ -1,10 +1,12 @@
 
 
-
+void updateValues();
 
 void Steppers_Init();
 
-void limitStop();
+void limitStop_X();
+
+void limitStop_Y();
 
 void calibrationToOrigin();
 

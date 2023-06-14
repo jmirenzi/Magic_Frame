@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <GCodeParser.h>
 // GCode states.
 bool absoluteMode = false;
@@ -41,31 +42,41 @@ AccelStepper M1(AccelStepper::DRIVER,M1_STEP_PIN,M1_DIR_PIN);
 AccelStepper M2(AccelStepper::DRIVER,M2_STEP_PIN,M2_DIR_PIN);
 const u_int16_t STEP_SIZE = AccelStepper::FULL4WIRE;
 const float STEPS_PER_REV = STEP_SIZE * 512/3.1415;
-const long GEAR_DIA = 16.0; //mm
+const float GEAR_DIA = 16.0; //mm
 const u_int16_t WIDTH=550, HEIGHT=600; //mm
 bool run_bool=true;
+volatile bool x_limit=false, y_limit=false;
 
 void Steppers_Init(){
-  float maxSpeed = 1500.0, maxAcc = 300.0;
+  float maxSpeed = 15000.0, maxAcc = 1500.0;
   M1.setMaxSpeed(maxSpeed);
   M1.setAcceleration(maxAcc);
   M1.setSpeed(maxSpeed);
   M2.setMaxSpeed(maxSpeed);
   M2.setAcceleration(maxAcc);
   M2.setSpeed(maxSpeed);
-  // M1.setPinsInverted(true,false,false);
-  // M2.setPinsInverted(true,false,false);
+  M1.setPinsInverted(true,false,false);
+  M2.setPinsInverted(true,false,false);
 }
 
 void setup()
-{
+{	Serial.begin(115200);
+delay(5000);
 	Steppers_Init();
-	pinMode(X_LIMIT_PIN,INPUT_PULLUP);
-	pinMode(Y_LIMIT_PIN,INPUT_PULLUP);
-	attachInterrupt(X_LIMIT_PIN,limitStop,FALLING);
-	attachInterrupt(Y_LIMIT_PIN,limitStop,FALLING);
+	// Serial.println(digitalRead(X_LIMIT_PIN));
+	// Serial.println(digitalRead(Y_LIMIT_PIN));
+	// attachInterrupt(digitalPinToInterrupt(X_LIMIT_PIN),limitStop_X,LOW);
+	// attachInterrupt(digitalPinToInterrupt(Y_LIMIT_PIN),limitStop_Y,LOW);
+	// pinMode(X_LIMIT_PIN,INPUT_PULLUP);
+	// pinMode(Y_LIMIT_PIN,INPUT_PULLUP);
+
+	attachInterrupt(digitalPinToInterrupt(X_LIMIT_PIN),limitStop_X,RISING);
+	attachInterrupt(digitalPinToInterrupt(Y_LIMIT_PIN),limitStop_Y,RISING);
+	pinMode(X_LIMIT_PIN,INPUT_PULLDOWN);
+	pinMode(Y_LIMIT_PIN,INPUT_PULLDOWN);
+
   	pinMode(LED1,OUTPUT); 
-	Serial.begin(115200);
+	
 	delay(10);
 	Serial.println("Begin");
 	// calibrationToOrigin();
@@ -74,44 +85,82 @@ void setup()
 void loop()
 {
   	digitalWrite(LED1,LOW);
+	updateValues();
 	while (Serial.available() > 0){
-    if (GCode.AddCharToLine(Serial.read())){
-		digitalWrite(LED1,HIGH);
-		GCode.ParseLine();
-		processCommand();
-    }
-  }
+		if (GCode.AddCharToLine(Serial.read())){
+			digitalWrite(LED1,HIGH);
+			GCode.ParseLine();
+			processCommand();
+    	}
+	}
+	#ifdef DEBUGGER_MODE
+	if(x_limit){Serial.println("X Limit Switch");x_limit=false;}
+	if(y_limit){Serial.println("Y Limit Switch");y_limit=false;}
+	#endif
 }
 
 inline double clamp(double value, double minValue, double maxValue){
   return value < minValue ? minValue : (value > maxValue ? maxValue : value);
 }
 
-void limitStop(){
+void limitStop_X(){
+	M1.stop();M2.stop();
+	M1.move(0);M2.move(0);
+	run_bool=false;
+	x_limit=true;
+	return;
+}
+
+void limitStop_Y(){
 	M1.stop();M2.stop();
 	run_bool=false;
-	#ifdef DEBUGGER_MODE
-		if(!digitalRead(X_LIMIT_PIN))
-			Serial.println("X Limit Switch");
-		else
-			Serial.println("Y Limit Switch");
-	#endif
+	y_limit=true;
+	return;
 }
 
 void calibrationToOrigin(){
+	x_limit=false;y_limit=false;
 	coreXYMove(-1.1*WIDTH,0);
+	if(!x_limit){
+		Serial.println("Calibration ERROR: X");
+		return;
+	}
+	run_bool=true;
+	x_limit=false;
 	X_cur=0;
+	delay(100);
 	coreXYMove(0,-1.1*HEIGHT);
+	if(!y_limit){
+		Serial.println("Calibration ERROR: Y");
+		return;
+	}
+	run_bool=true;
+	y_limit=false;
 	Y_cur=0;
+	delay(100);
+	M1.setCurrentPosition(0);
+	M2.setCurrentPosition(0);
+	return;
+}
+
+void updateValues(){
+	double M1_mm, M2_mm;
+	M1_mm = M1.currentPosition()*GEAR_DIA/STEPS_PER_REV;
+	M2_mm = M2.currentPosition()*GEAR_DIA/STEPS_PER_REV;
+	X_cur = 0.5*(M1_mm+M2_mm);
+	Y_cur = 0.5*(M1_mm-M2_mm);
 	return;
 }
 
 void coreXYMoveTo(double X_des, double Y_des){
 	coreXYMove(X_des-X_cur,Y_des-Y_cur);
+	return;
 }
 
 void coreXYMove(double dx, double dy){
-	long dM1 = dx+dy, dM2 = dx-dy;
+	// Serial.print(dx);Serial.print(" + ");Serial.println(dy);
+	long dM1,dM2;
+	dM1 = (dx+dy); dM2 = (dx-dy);
 	#ifdef DEBUGGER_MODE
 		Serial.print("dM1: ");
 		Serial.print(dM1);
@@ -120,9 +169,11 @@ void coreXYMove(double dx, double dy){
 	#endif
 	M1.move(dM1*STEPS_PER_REV/GEAR_DIA);
 	M2.move(dM2*STEPS_PER_REV/GEAR_DIA);
-	while(M1.run() || M2.run()){
+	while(M1.isRunning() || M2.isRunning()){
 		if (!run_bool)
 			break;
+		M1.run();
+		M2.run();
 		delayMicroseconds(1);
 		//some updating display could go here
 	}
@@ -149,10 +200,9 @@ void processCommand(bool noSerialResponse){
 			else
 				Y_temp += GCode.GetWordValue('Y') * zoom;
 		}
-		X_temp = clamp(X_temp,0,WIDTH);
-		Y_temp = clamp(Y_temp,0,HEIGHT);
-		
-		Serial.println("testing");
+		// Serial.print(X_temp);Serial.print("  ");Serial.println(Y_temp);
+		// X_temp = clamp(X_temp,0,WIDTH);
+		// Y_temp = clamp(Y_temp,0,HEIGHT);
     }
 
     switch (gCodeNumber){
@@ -165,7 +215,7 @@ void processCommand(bool noSerialResponse){
 		case 0:
 			// moves r2 and r4 first then r1 and r3 in hopes the tensioners provide a buffer and stop the motors from working against each other
 
-			coreXYMoveTo(X_temp,X_temp);
+			coreXYMoveTo(X_temp,Y_temp);
 			break;
 
 		// G01 – Linear Interpolation
@@ -177,7 +227,7 @@ void processCommand(bool noSerialResponse){
 		// intuitive to understand, behind them, the machine controller performs
 		// thousands of calculations per second in order to make these movements.
 		case 1:
-			coreXYMoveTo(X_temp,X_temp);
+			coreXYMoveTo(X_temp,Y_temp);
 			break;
 
 		// G02 – Circular Interpolation Clockwise
@@ -241,6 +291,15 @@ void processCommand(bool noSerialResponse){
 		case 0:
 			M1.stop();
 			M1.stop();
+			run_bool = false;
+			break;
+		// M1 - TEST TRIGGER
+		case 1:
+			Serial.println(digitalRead(Y_LIMIT_PIN));
+			break;
+		// M024 - Resume Print
+		case 24:
+			run_bool = true;
 			break;
 
 		// M099 - sets current coords
@@ -253,10 +312,10 @@ void processCommand(bool noSerialResponse){
 		}
 		// M999 - Prints Global Values
 		case 999:{
-			Serial.print("x: ");
-			Serial.print(X_cur);
-			Serial.print(" y: ");
-			Serial.println(Y_cur);
+			Serial.print("M1: ");Serial.print(M1.currentPosition());
+			Serial.print("  M2: ");Serial.println(M2.currentPosition());
+			Serial.print("x: ");Serial.print(X_cur);
+			Serial.print("  y: ");Serial.println(Y_cur);
 			Serial.print("Absolute Mode: ");
 			Serial.println(absoluteMode);
 			break;
