@@ -48,13 +48,13 @@ bool run_bool=true;
 volatile bool x_limit=false, y_limit=false;
 
 void Steppers_Init(){
-  float maxSpeed = 15000.0, maxAcc = 1500.0;
+  float maxSpeed = 200.0, maxAcc = 500.0;
   M1.setMaxSpeed(maxSpeed);
   M1.setAcceleration(maxAcc);
-  M1.setSpeed(maxSpeed);
+//   M1.setSpeed(maxSpeed);
   M2.setMaxSpeed(maxSpeed);
   M2.setAcceleration(maxAcc);
-  M2.setSpeed(maxSpeed);
+//   M2.setSpeed(maxSpeed);
   M1.setPinsInverted(true,false,false);
   M2.setPinsInverted(true,false,false);
 }
@@ -63,12 +63,6 @@ void setup()
 {	Serial.begin(115200);
 delay(5000);
 	Steppers_Init();
-	// Serial.println(digitalRead(X_LIMIT_PIN));
-	// Serial.println(digitalRead(Y_LIMIT_PIN));
-	// attachInterrupt(digitalPinToInterrupt(X_LIMIT_PIN),limitStop_X,LOW);
-	// attachInterrupt(digitalPinToInterrupt(Y_LIMIT_PIN),limitStop_Y,LOW);
-	// pinMode(X_LIMIT_PIN,INPUT_PULLUP);
-	// pinMode(Y_LIMIT_PIN,INPUT_PULLUP);
 
 	attachInterrupt(digitalPinToInterrupt(X_LIMIT_PIN),limitStop_X,RISING);
 	attachInterrupt(digitalPinToInterrupt(Y_LIMIT_PIN),limitStop_Y,RISING);
@@ -85,7 +79,7 @@ delay(5000);
 void loop()
 {
   	digitalWrite(LED1,LOW);
-	updateValues();
+	updateValues(); //may not need to cal this frequent
 	while (Serial.available() > 0){
 		if (GCode.AddCharToLine(Serial.read())){
 			digitalWrite(LED1,HIGH);
@@ -97,6 +91,8 @@ void loop()
 	if(x_limit){Serial.println("X Limit Switch");x_limit=false;}
 	if(y_limit){Serial.println("Y Limit Switch");y_limit=false;}
 	#endif
+	// TODO: Clean this up
+	delay(10);
 }
 
 inline double clamp(double value, double minValue, double maxValue){
@@ -104,42 +100,36 @@ inline double clamp(double value, double minValue, double maxValue){
 }
 
 void limitStop_X(){
-	M1.stop();M2.stop();
-	M1.move(0);M2.move(0);
-	run_bool=false;
-	x_limit=true;
+	if(!digitalRead(X_LIMIT_PIN))
+		return;
+	run_bool=false;x_limit=true;
 	return;
 }
 
 void limitStop_Y(){
-	M1.stop();M2.stop();
-	run_bool=false;
-	y_limit=true;
+	if(!digitalRead(Y_LIMIT_PIN))
+		return;
+	run_bool=false;y_limit=true;
 	return;
 }
 
 void calibrationToOrigin(){
-	x_limit=false;y_limit=false;
-	coreXYMove(-1.1*WIDTH,0);
-	if(!x_limit){
-		Serial.println("Calibration ERROR: X");
-		return;
-	}
-	run_bool=true;
-	x_limit=false;
-	X_cur=0;
-	delay(100);
-	coreXYMove(0,-1.1*HEIGHT);
-	if(!y_limit){
-		Serial.println("Calibration ERROR: Y");
-		return;
-	}
-	run_bool=true;
-	y_limit=false;
-	Y_cur=0;
-	delay(100);
-	M1.setCurrentPosition(0);
-	M2.setCurrentPosition(0);
+	int speed_=100*STEP_SIZE/4.0,home_pos=10;
+	x_limit=false;y_limit=false;run_bool=true;
+	M1.move(-1*WIDTH*STEPS_PER_REV/GEAR_DIA);M2.move(-1*HEIGHT*STEPS_PER_REV/GEAR_DIA);
+	M1.setSpeed(speed_);M2.setSpeed(speed_);
+	while(!x_limit){M1.run();M2.run();}
+	M1.move(-1*WIDTH*STEPS_PER_REV/GEAR_DIA);M2.move(HEIGHT*STEPS_PER_REV/GEAR_DIA);
+	M1.setSpeed(speed_);M2.setSpeed(speed_);
+	while(!y_limit){M1.run();M2.run();}
+	X_cur=0;Y_cur=0;
+	M1.setCurrentPosition(0);M2.setCurrentPosition(0);
+	M1.move(2*home_pos*STEPS_PER_REV/GEAR_DIA);
+	while (M1.isRunning()){M1.run();}
+	x_limit=false;y_limit=false;run_bool=true;
+	#ifdef DEBUGGER_MODE
+	Serial.println("Calibration Done");
+	#endif
 	return;
 }
 
@@ -158,7 +148,6 @@ void coreXYMoveTo(double X_des, double Y_des){
 }
 
 void coreXYMove(double dx, double dy){
-	// Serial.print(dx);Serial.print(" + ");Serial.println(dy);
 	long dM1,dM2;
 	dM1 = (dx+dy); dM2 = (dx-dy);
 	#ifdef DEBUGGER_MODE
@@ -169,11 +158,16 @@ void coreXYMove(double dx, double dy){
 	#endif
 	M1.move(dM1*STEPS_PER_REV/GEAR_DIA);
 	M2.move(dM2*STEPS_PER_REV/GEAR_DIA);
+	// if(M1.distanceToGo()==0 && M2.distanceToGo()==0)
+	// 	return;
 	while(M1.isRunning() || M2.isRunning()){
-		if (!run_bool)
+		if (!run_bool){
+			M1.stop();M2.stop();
+			while (M1.runSpeedToPosition() || M1.runSpeedToPosition()) {}
+			M1.move(0);M2.move(0);
 			break;
-		M1.run();
-		M2.run();
+		}
+		M1.run();M2.run();
 		delayMicroseconds(1);
 		//some updating display could go here
 	}
@@ -300,6 +294,9 @@ void processCommand(bool noSerialResponse){
 		// M024 - Resume Print
 		case 24:
 			run_bool = true;
+			M1.enableOutputs();M2.enableOutputs();
+			Serial.print("M1 to go: ");Serial.println(M1.distanceToGo());
+			Serial.print("M2 to go: ");Serial.println(M2.distanceToGo());
 			break;
 
 		// M099 - sets current coords
