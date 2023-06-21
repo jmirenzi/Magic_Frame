@@ -85,6 +85,7 @@ void loop()
 			digitalWrite(LED1,HIGH);
 			GCode.ParseLine();
 			processCommand();
+			Serial.println(".");
     	}
 	}
 	#ifdef DEBUGGER_MODE
