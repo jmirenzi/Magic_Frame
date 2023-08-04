@@ -1,15 +1,37 @@
 #include <Arduino.h>
 #include <GCodeParser.h>
+#include "RP2040_ISR_Servo.h"
+
+// SERVO Definition 
+#if ( defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_RASPBERRY_PI_PICO) || defined(ARDUINO_ADAFRUIT_FEATHER_RP2040) || \
+      defined(ARDUINO_GENERIC_RP2040) ) && !defined(ARDUINO_ARCH_MBED)
+  #if !defined(RP2040_ISR_SERVO_USING_MBED)    
+    #define RP2040_ISR_SERVO_USING_MBED     false
+  #endif  
+  
+#elif ( defined(ARDUINO_NANO_RP2040_CONNECT) || defined(ARDUINO_RASPBERRY_PI_PICO) || defined(ARDUINO_ADAFRUIT_FEATHER_RP2040) || \
+      defined(ARDUINO_GENERIC_RP2040) ) && defined(ARDUINO_ARCH_MBED)
+      
+  #if !defined(RP2040_ISR_SERVO_USING_MBED)    
+    #define RP2040_ISR_SERVO_USING_MBED     true
+  #endif  
+  
+#else      
+  #error This code is intended to run on the mbed / non-mbed RP2040 platform! Please check your Tools->Board setting.
+#endif
+
 // GCode states.
 bool absoluteMode = false;
 float zoom = 1.0;
 double X_cur=0.0,Y_cur=0.0,X_temp,Y_temp;
+bool Z_up,Z_temp;
+int pen_servo_index;
 GCodeParser GCode = GCodeParser();
 
 #include <AccelStepper.h>
 #include <magicFrame.h>
 
-#define DEBUGGER_MODE
+// #define DEBUGGER_MODE
 #ifdef DEBUGGER_MODE
 
 #define ERROR 11
@@ -38,17 +60,21 @@ void logger(int TYPE,char const msg[]){
 const int X_LIMIT_PIN = 6, Y_LIMIT_PIN = 7;
 const int M1_DIR_PIN = 2, M1_STEP_PIN = 3;
 const int M2_DIR_PIN = 4, M2_STEP_PIN = 5;
+const int SERVO_PIN = 22;
+const int SERVO_POS_DOWN = 165, SERVO_POS_UP = 90;
 AccelStepper M1(AccelStepper::DRIVER,M1_STEP_PIN,M1_DIR_PIN);
 AccelStepper M2(AccelStepper::DRIVER,M2_STEP_PIN,M2_DIR_PIN);
-const u_int16_t STEP_SIZE = AccelStepper::FULL4WIRE;
-const float STEPS_PER_REV = STEP_SIZE * 512/3.1415;
-const float GEAR_DIA = 16.0; //mm
+// const u_int16_t STEP_SIZE = AccelStepper::FULL4WIRE;
+const u_int16_t STEP_SIZE = AccelStepper::HALF4WIRE;
+// const u_int16_t STEP_SIZE = 2; //quarter step MAY NOT WORK
+const float STEPS_PER_REV = STEP_SIZE/4.0 * 200*.3;
+const float GEAR_DIA = 12.22; //mm
 const u_int16_t WIDTH=550, HEIGHT=600; //mm
 bool run_bool=true;
 volatile bool x_limit=false, y_limit=false;
 
 void Steppers_Init(){
-  float maxSpeed = 200.0, maxAcc = 500.0;
+  float maxSpeed = 200*STEP_SIZE/4.0, maxAcc = 500.0*STEP_SIZE/4.0;
   M1.setMaxSpeed(maxSpeed);
   M1.setAcceleration(maxAcc);
 //   M1.setSpeed(maxSpeed);
@@ -59,10 +85,37 @@ void Steppers_Init(){
   M2.setPinsInverted(true,false,false);
 }
 
+void Servo_Init(){
+	pinMode(SERVO_PIN, OUTPUT);
+    digitalWrite(SERVO_PIN, LOW);
+
+	
+	#if defined(ARDUINO_ARCH_MBED)
+	Serial.print(F("\nStarting RP2040_MultipleServos on Mbed "));
+	#else
+	Serial.print(F("\nStarting RP2040_MultipleServos on "));
+	#endif
+
+	Serial.println(BOARD_NAME);
+	Serial.println(RP2040_ISR_SERVO_VERSION);
+	pen_servo_index=RP2040_ISR_Servos.setupServo(SERVO_PIN,80,2450);
+	if (pen_servo_index != -1){
+		Serial.println("Servo Setup Success");
+		RP2040_ISR_Servos.setPosition(pen_servo_index,0);
+	}
+	else{
+		Serial.println("Setup Fail");
+		while(1){delay(1);}
+	}
+	Z_up=false;
+	penMoveUp(true);
+}
+
 void setup()
 {	Serial.begin(115200);
 delay(5000);
 	Steppers_Init();
+	Servo_Init();
 
 	attachInterrupt(digitalPinToInterrupt(X_LIMIT_PIN),limitStop_X,RISING);
 	attachInterrupt(digitalPinToInterrupt(Y_LIMIT_PIN),limitStop_Y,RISING);
@@ -100,6 +153,20 @@ inline double clamp(double value, double minValue, double maxValue){
   return value < minValue ? minValue : (value > maxValue ? maxValue : value);
 }
 
+void penMoveUp(bool true_if_up){
+	if (Z_up==true_if_up)
+		return;
+
+	if (true_if_up){
+		RP2040_ISR_Servos.setPosition(pen_servo_index, SERVO_POS_UP);
+	}
+	else{
+		RP2040_ISR_Servos.setPosition(pen_servo_index, SERVO_POS_DOWN);
+	}
+	Z_up=true_if_up;
+	delay(250);
+}
+
 void limitStop_X(){
 	if(!digitalRead(X_LIMIT_PIN))
 		return;
@@ -115,7 +182,7 @@ void limitStop_Y(){
 }
 
 void calibrationToOrigin(){
-	int speed_=100*STEP_SIZE/4.0,home_pos=10;
+	int speed_=100*STEP_SIZE/4.0,home_pos=40;
 	x_limit=false;y_limit=false;run_bool=true;
 	M1.move(-1*WIDTH*STEPS_PER_REV/GEAR_DIA);M2.move(-1*HEIGHT*STEPS_PER_REV/GEAR_DIA);
 	M1.setSpeed(speed_);M2.setSpeed(speed_);
@@ -129,7 +196,7 @@ void calibrationToOrigin(){
 	while (M1.isRunning()){M1.run();}
 	x_limit=false;y_limit=false;run_bool=true;
 	#ifdef DEBUGGER_MODE
-	Serial.println("Calibration Done");
+	Serial.print("Calibration Done");
 	#endif
 	return;
 }
@@ -155,7 +222,7 @@ void coreXYMove(double dx, double dy){
 		Serial.print("dM1: ");
 		Serial.print(dM1);
 		Serial.print("  dM2: ");
-		Serial.println(dM2);
+		Serial.print(dM2);
 	#endif
 	M1.move(dM1*STEPS_PER_REV/GEAR_DIA);
 	M2.move(dM2*STEPS_PER_REV/GEAR_DIA);
@@ -181,7 +248,7 @@ void processCommand(bool noSerialResponse){
   
   if (GCode.HasWord('G')){
     int gCodeNumber = (int)GCode.GetWordValue('G');
-    X_temp = X_cur; Y_temp = Y_cur;
+    X_temp = X_cur; Y_temp = Y_cur; Z_temp = Z_up;
     if (gCodeNumber >= 0 && gCodeNumber <= 3){ // G0, G1, G2, G3
 		if (GCode.HasWord('X')){
 			if (absoluteMode)
@@ -194,6 +261,9 @@ void processCommand(bool noSerialResponse){
 				Y_temp = GCode.GetWordValue('Y') * zoom;
 			else
 				Y_temp += GCode.GetWordValue('Y') * zoom;
+		}
+		if (GCode.HasWord('Z')){
+			Z_temp = GCode.GetWordValue('Z') > 0;
 		}
 		// Serial.print(X_temp);Serial.print("  ");Serial.println(Y_temp);
 		// X_temp = clamp(X_temp,0,WIDTH);
@@ -209,7 +279,7 @@ void processCommand(bool noSerialResponse){
 		// position point.
 		case 0:
 			// moves r2 and r4 first then r1 and r3 in hopes the tensioners provide a buffer and stop the motors from working against each other
-
+			penMoveUp(Z_temp);
 			coreXYMoveTo(X_temp,Y_temp);
 			break;
 
@@ -222,6 +292,7 @@ void processCommand(bool noSerialResponse){
 		// intuitive to understand, behind them, the machine controller performs
 		// thousands of calculations per second in order to make these movements.
 		case 1:
+			penMoveUp(Z_temp);
 			coreXYMoveTo(X_temp,Y_temp);
 			break;
 
@@ -239,7 +310,9 @@ void processCommand(bool noSerialResponse){
 		// counterclockwise. All other features and rules are the same as the G02
 		// command.
 		case 3:
+			#ifdef DEBUGGER_MODE
 			logger(ERROR,"Circular Movement not configured");
+			#endif
 			break;
 
 		// G04 – Dwell Command
@@ -279,7 +352,6 @@ void processCommand(bool noSerialResponse){
   }
 
   else if (GCode.HasWord('M')){ // M-Codes
-    // Serial.println("M-Code");
     int mCodeNumber = (int)GCode.GetWordValue('M');
     switch (mCodeNumber){
 		// M0 - Program Stop
@@ -289,15 +361,17 @@ void processCommand(bool noSerialResponse){
 			run_bool = false;
 			break;
 		// M1 - TEST TRIGGER
+		#ifdef DEBUGGER_MODE
 		case 1:
 			Serial.println(digitalRead(Y_LIMIT_PIN));
 			break;
+		#endif
 		// M024 - Resume Print
 		case 24:
 			run_bool = true;
 			M1.enableOutputs();M2.enableOutputs();
-			Serial.print("M1 to go: ");Serial.println(M1.distanceToGo());
-			Serial.print("M2 to go: ");Serial.println(M2.distanceToGo());
+			Serial.print("M1 to go: ");Serial.print(M1.distanceToGo());
+			Serial.print("  M2 to go: ");Serial.print(M2.distanceToGo());
 			break;
 
 		// M099 - sets current coords
@@ -311,11 +385,11 @@ void processCommand(bool noSerialResponse){
 		// M999 - Prints Global Values
 		case 999:{
 			Serial.print("M1: ");Serial.print(M1.currentPosition());
-			Serial.print("  M2: ");Serial.println(M2.currentPosition());
-			Serial.print("x: ");Serial.print(X_cur);
-			Serial.print("  y: ");Serial.println(Y_cur);
-			Serial.print("Absolute Mode: ");
-			Serial.println(absoluteMode);
+			Serial.print("  M2: ");Serial.print(M2.currentPosition());
+			Serial.print("  x: ");Serial.print(X_cur);
+			Serial.print("  y: ");Serial.print(Y_cur);
+			Serial.print("  Absolute Mode: ");
+			Serial.print(absoluteMode);
 			break;
       }
     }

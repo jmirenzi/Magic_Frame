@@ -1,8 +1,10 @@
+void Steppers_Init();
 
+void Servo_Init();
+
+void penMoveUp(bool);
 
 void updateValues();
-
-void Steppers_Init();
 
 void limitStop_X();
 
